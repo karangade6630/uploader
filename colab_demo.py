@@ -490,7 +490,6 @@ def run_remote_colab_cycle(cycle_num):
     "colab",
     "--auth=adc",
     "run",
-    "--keep",
     "--timeout",
     str(TIMEOUT_SECONDS),
     TARGET_FILE,
