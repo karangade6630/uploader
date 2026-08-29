@@ -897,7 +897,7 @@ NOTEBOOK_FILE = "notebook.ipynb"
 TARGET_FILE = "script.py"
 SESSION_ID_FILE = "active_colab_session.lock"
 
-TIMEOUT_SECONDS = 2 * 60     # 2-minute limit passed to `colab run --timeout`
+TIMEOUT_SECONDS = 10 * 60     # 10-minute limit passed to `colab run --timeout`
 WATCHDOG_GRACE_SECONDS = 20  # extra buffer BEFORE Python force-kills locally.
                              # Total worst-case time before a forced kill is
                              # TIMEOUT_SECONDS + WATCHDOG_GRACE_SECONDS.
