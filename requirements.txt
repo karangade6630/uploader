@@ -3,3 +3,4 @@ psutil
 gdown
 flask
 requests
+jupyter-kernel-client
