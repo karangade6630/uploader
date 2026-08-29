@@ -48,7 +48,7 @@ NOTEBOOK_FILE = "notebook.ipynb"
 TARGET_FILE = "script.py"
 SESSION_ID_FILE = "active_colab_session.lock"
 
-TIMEOUT_SECONDS = 10 * 60  # 10-minute limit
+TIMEOUT_SECONDS = 1 * 60  # 1-minute limit
 TOTAL_CYCLES = 99999999999
 INTERMISSION_DELAY = 10     # seconds between cycles
 COOLDOWN_ON_412 = 10       # cooldown when rate-limited
