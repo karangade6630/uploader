@@ -365,7 +365,15 @@ def run_remote_colab_cycle(cycle_num):
     if _DASHBOARD_AVAILABLE and _ds.should_stop():
         return False
 
-    exec_command = ["colab", "run", "--timeout", str(TIMEOUT_SECONDS), TARGET_FILE]
+    # exec_command = ["colab", "run", "--timeout", str(TIMEOUT_SECONDS), TARGET_FILE]
+    exec_command = [
+    "colab",
+    "--auth=adc",
+    "run",
+    "--timeout",
+    str(TIMEOUT_SECONDS),
+    TARGET_FILE
+]
     session_id = None
     process = None
 
@@ -537,12 +545,50 @@ def _start_fresh_run():
         )
         _runner_thread.start()
 
+def setup_google_adc():
+    """
+    Configure Google Application Default Credentials.
+
+    Local:
+        Uses the normal gcloud ADC location.
+
+    Render:
+        Uses the Render Secret File.
+    """
+
+    if os.environ.get("RENDER") == "true":
+        credentials_path = "/etc/secrets/application_default_credentials.json"
+
+        if not os.path.isfile(credentials_path):
+            raise FileNotFoundError(
+                f"❌ Google credentials not found: {credentials_path}"
+            )
+
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
+
+        print("✅ Render Google ADC credentials detected.")
+        print(f"🔐 Credentials: {credentials_path}")
+
+    else:
+        local_credentials = os.path.join(
+            os.environ.get("APPDATA", ""),
+            "gcloud",
+            "application_default_credentials.json"
+        )
+
+        if os.path.isfile(local_credentials):
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = local_credentials
+            print("✅ Local Google ADC credentials detected.")
+        else:
+            print("⚠️ Local Google ADC credentials not found.")
 
 # ---------------------------------------------------------------------------
 # ── ENTRY POINT ────────────────────────────────────────────────────────────
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+     # Configure Google authentication first
+    setup_google_adc()
     # ── Start live dashboard server ────────────────────────────────────────
     if _DASHBOARD_AVAILABLE:
         # Register our callbacks so the browser control buttons work
