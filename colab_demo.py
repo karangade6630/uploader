@@ -141,52 +141,16 @@ def _on_resume():
             _emit("log", msg="▶ Active process resumed.")
 
 
-# def _on_stop():
-#     print("\n🛑 Stop requested from dashboard — killing active process…")
-#     _kill_active_process()
-    
-#     # Run session cleanup in a background thread to keep UI responsive
-#     threading.Thread(target=cleanup_and_verify_sessions, daemon=True).start()
-    
-#     _emit("warn", msg="🛑 Run stopped by user. Clearing active sessions…")
-
 def _on_stop():
-    print("\n🛑 Stop requested from dashboard.")
-
-    # 1. Stop the local colab CLI subprocess
+    print("\n🛑 Stop requested from dashboard — killing active process…")
     _kill_active_process()
+    
+    # Run session cleanup in a background thread to keep UI responsive
+    threading.Thread(target=cleanup_and_verify_sessions, daemon=True).start()
+    
+    _emit("warn", msg="🛑 Run stopped by user. Clearing active sessions…")
 
-    # 2. Get the exact remote session name immediately
-    session_name = manage_session_lock(action="get")
 
-    if session_name:
-        print(f"🛑 Remote session found: {session_name}")
-
-        # Stop the remote VM explicitly
-        threading.Thread(
-            target=stop_session,
-            args=(session_name,),
-            daemon=True,
-            name="remote-colab-stop",
-        ).start()
-
-        # Remove the lock
-        manage_session_lock(action="clear")
-
-    else:
-        print("⚠️ No stored remote session found.")
-
-        # Fallback: scan all active sessions
-        threading.Thread(
-            target=cleanup_and_verify_sessions,
-            daemon=True,
-            name="colab-cleanup",
-        ).start()
-
-    _emit(
-        "warn",
-        msg="🛑 Stop requested — terminating remote Colab session…"
-    )
 # ---------------------------------------------------------------------------
 # ── STDOUT LINE PARSER / DASHBOARD EMITTER ─────────────────────────────────
 # ---------------------------------------------------------------------------
@@ -344,20 +308,27 @@ def manage_session_lock(session_id=None, action="get"):
 #         print(f"❌ Error terminating {session_id}: {e}")
 #         _emit("error", msg=f"❌ Error terminating session {session_id}: {e}")
 
-def stop_session(session_name):
-    """Terminate the specific remote Colab session."""
-    if not session_name:
-        print("⚠️ No Colab session name to stop.")
+def stop_session(session_id):
+    """Stop one specific remote Colab session."""
+
+    if not session_id:
+        print("⚠️ No Colab session ID available.")
         return False
 
-    # Ensure the CLI receives the full session name.
-    # Example: run-f5abb3
-    if not session_name.startswith("run-"):
-        session_name = session_name
+    # You want to store only the ID, e.g.:
+    # 68d60c
+    #
+    # But Colab's generated session name is:
+    # run-68d60c
+    session_name = (
+        session_id
+        if session_id.startswith("run-")
+        else f"run-{session_id}"
+    )
+
+    print(f"🛑 Requesting remote Colab stop: {session_name}")
 
     try:
-        print(f"🛑 Stopping remote Colab session: {session_name}")
-
         result = subprocess.run(
             [
                 "colab",
@@ -374,42 +345,49 @@ def stop_session(session_name):
             env=SUBPROCESS_ENV,
         )
 
-        output = (result.stdout or "") + (result.stderr or "")
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
 
-        if output.strip():
-            print(output.rstrip())
+        if stdout:
+            print(stdout)
+
+        if stderr:
+            print(stderr)
 
         if result.returncode == 0:
-            print(f"✅ Remote Colab session stopped: {session_name}")
+            print(
+                f"✅ Remote Colab session stopped successfully: "
+                f"{session_name}"
+            )
 
             _emit(
                 "session_stop",
-                msg=f"🛑 Remote Colab session stopped: {session_name}",
-                session_id=session_name,
+                msg=f"🛑 Remote Colab session stopped: {session_id}",
+                session_id=session_id,
             )
 
             return True
 
         print(
-            f"⚠️ Failed to stop session {session_name} "
+            f"❌ Colab stop failed for {session_name} "
             f"(exit code {result.returncode})"
         )
 
         _emit(
             "error",
-            msg=f"❌ Failed to stop Colab session: {session_name}",
-            session_id=session_name,
+            msg=f"❌ Failed to stop Colab session: {session_id}",
+            session_id=session_id,
         )
 
         return False
 
     except subprocess.TimeoutExpired:
-        print(f"⏰ Timeout while stopping session: {session_name}")
+        print(f"⏰ Timeout while stopping {session_name}")
 
         _emit(
             "error",
-            msg=f"⏰ Timeout while stopping session: {session_name}",
-            session_id=session_name,
+            msg=f"⏰ Timeout stopping Colab session: {session_id}",
+            session_id=session_id,
         )
 
         return False
@@ -419,11 +397,11 @@ def stop_session(session_name):
 
         _emit(
             "error",
-            msg=f"❌ Error stopping session {session_name}: {e}",
+            msg=f"❌ Error stopping Colab session: {session_id}",
         )
 
         return False
-    
+
 def cleanup_and_verify_sessions():
     """Aggressively finds and kills active sessions concurrently."""
     print("🧹 Clearing active Google Colab cloud sessions...")
@@ -437,18 +415,10 @@ def cleanup_and_verify_sessions():
 
     try:
         list_check = subprocess.run(
-    [
-        "colab",
-        "--auth=adc",
-        "sessions",
-    ],
-    capture_output=True,
-    text=True,
-    encoding="utf-8",
-    errors="replace",
-    timeout=10,
-    env=SUBPROCESS_ENV,
-)
+            ["colab", "sessions"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=10, env=SUBPROCESS_ENV
+        )
         if list_check.returncode == 0 and list_check.stdout.strip():
             # Extract session IDs (6-character hex strings)
             found_ids = set()
@@ -508,13 +478,22 @@ def run_remote_colab_cycle(cycle_num):
         return False
 
     # exec_command = ["colab", "run", "--timeout", str(TIMEOUT_SECONDS), TARGET_FILE]
+#     exec_command = [
+#     "colab",
+#     "--auth=adc",
+#     "run",
+#     "--timeout",
+#     str(TIMEOUT_SECONDS),
+#     TARGET_FILE
+# ] 
     exec_command = [
     "colab",
     "--auth=adc",
     "run",
+    "--keep",
     "--timeout",
     str(TIMEOUT_SECONDS),
-    TARGET_FILE
+    TARGET_FILE,
 ]
     session_id = None
     process = None
@@ -528,20 +507,44 @@ def run_remote_colab_cycle(cycle_num):
         )
         _set_active_process(process)
 
+        # def _handle_line(line):
+        #     nonlocal session_id
+        #     if not session_id:
+        #         match = re.search(r"(?:Creating session '|READY \()(?:run-)?([a-zA-Z0-9]+)", line)
+        #         if match:
+        #             session_id = match.group(1).strip()
+        #             print(f"\n📌 Isolated Session ID: {session_id}")
+        #             manage_session_lock(session_id, action="save")
+        #             _emit("session_ready",
+        #                   msg=f"📌 Session ready: {session_id}",
+        #                   session_id=session_id)
+
         def _handle_line(line):
             nonlocal session_id
+
             if not session_id:
-                match = re.search(r"(?:Creating session '|READY \()(?:run-)?([a-zA-Z0-9]+)", line)
+                match = re.search(
+            r"(?:Creating session '|Session READY \()(?:run-)?([a-zA-Z0-9]+)",
+            line
+        )
+
                 if match:
                     session_id = match.group(1).strip()
-                    print(f"\n📌 Isolated Session ID: {session_id}")
-                    manage_session_lock(session_id, action="save")
-                    _emit("session_ready",
-                          msg=f"📌 Session ready: {session_id}",
-                          session_id=session_id)
 
+                    print(
+                f"\n📌 Isolated Session ID: {session_id}"
+            )
 
+                    manage_session_lock(
+                session_id,
+                action="save"
+            )
 
+                    _emit(
+                "session_ready",
+                msg=f"📌 Session ready: {session_id}",
+                session_id=session_id
+            )
 
         stream_subprocess_output(process, on_line=_handle_line)
         process.wait()
