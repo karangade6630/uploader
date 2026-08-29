@@ -31,7 +31,10 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-PORT = 5757
+# ---------------------------------------------------------------------------
+# Render / Production configuration
+# ---------------------------------------------------------------------------
+PORT = int(os.environ.get("PORT", 5757))
 DASHBOARD_DIR = os.path.dirname(os.path.abspath(__file__))
 
 app = Flask(__name__)
@@ -307,35 +310,50 @@ def wait_if_paused(check_interval: float = 0.25):
 
 def start_server(open_browser: bool = True):
     """
-    Start the Flask server in a daemon background thread, then open the browser.
-    Returns immediately.
+    Start the Flask server in a daemon background thread.
+    Works locally and on Render.
     """
+
     def _run():
         # Silence Flask's default request logging
         import logging
         log = logging.getLogger("werkzeug")
         log.setLevel(logging.ERROR)
-        app.run(host="127.0.0.1", port=PORT, debug=False, use_reloader=False, threaded=True)
 
-    t = threading.Thread(target=_run, daemon=True, name="dashboard-server")
+        app.run(
+            host="0.0.0.0",
+            port=PORT,
+            debug=False,
+            use_reloader=False,
+            threaded=True
+        )
+
+    t = threading.Thread(
+        target=_run,
+        daemon=True,
+        name="dashboard-server"
+    )
+
     t.start()
 
     # Give Flask a moment to bind the port
     time.sleep(1.2)
 
     if open_browser:
-        webbrowser.open(f"http://127.0.0.1:{PORT}")
+        # Only open browser when running locally.
+        # Render has no local browser to open.
+        if os.environ.get("RENDER") != "true":
+            webbrowser.open(f"http://127.0.0.1:{PORT}")
 
-    print(f"🌐 Live dashboard → http://127.0.0.1:{PORT}")
+    print(f"🌐 Live dashboard → http://0.0.0.0:{PORT}")
     return t
-
 
 # ---------------------------------------------------------------------------
 # Standalone mode (python dashboard_server.py)
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print(f"🚀 Starting standalone dashboard server on port {PORT}...")
-    start_server(open_browser=True)
+    start_server(open_browser=False)  # Don't open browser in standalone mode
     # Keep main thread alive
     try:
         while True:

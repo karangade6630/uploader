@@ -550,6 +550,53 @@ if __name__ == "__main__":
         _ds.register_pause_callback(_on_pause)
         _ds.register_resume_callback(_on_resume)
         _ds.register_stop_callback(_on_stop)
+
+        # Start dashboard server
+        _ds.start_server(
+            open_browser=(os.environ.get("RENDER") != "true")
+        )
+
+        _emit(
+            "log",
+            msg="🌐 Live dashboard started — press ▶ START to begin running cycles"
+        )
+
+        print("✅ Dashboard ready. Press ▶ START in the browser.")
+    else:
+        print("⚠️ dashboard_server.py not found or flask not installed.")
+        print("    Install with: pip install flask")
+        print("    Falling back to direct run…\n")
+
+        check_dependencies()
+
+        try:
+            _run_all_cycles()
+        except KeyboardInterrupt:
+            print("\n\n🛑 Interrupt received!")
+            _kill_active_process()
+            cleanup_and_verify_sessions()
+            sys.exit(0)
+
+    # Keep the main thread alive so daemon threads keep running
+    check_dependencies()
+
+    try:
+        while True:
+            time.sleep(1)
+
+    except KeyboardInterrupt:
+        print("\n\n🛑 Interrupt received! Cleaning up active sessions...")
+        _emit("warn", msg="🛑 Interrupted by user — cleaning up…")
+        _kill_active_process()
+        cleanup_and_verify_sessions()
+        sys.exit(0)
+    # ── Start live dashboard server ────────────────────────────────────────
+    if _DASHBOARD_AVAILABLE:
+        # Register our callbacks so the browser control buttons work
+        _ds.register_start_callback(_start_fresh_run)
+        _ds.register_pause_callback(_on_pause)
+        _ds.register_resume_callback(_on_resume)
+        _ds.register_stop_callback(_on_stop)
         _ds.start_server(open_browser=True)
         _emit("log", msg="🌐 Live dashboard started — press ▶ START to begin running cycles")
         print("✅ Dashboard ready. Press ▶ START in the browser to begin.")
