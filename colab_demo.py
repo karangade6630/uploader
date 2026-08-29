@@ -12,6 +12,25 @@ import threading
 import psutil
 from concurrent.futures import ThreadPoolExecutor
 
+
+print("========== GOOGLE ADC CHECK ==========")
+
+credentials_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+
+print("GOOGLE_APPLICATION_CREDENTIALS =", credentials_path)
+
+if credentials_path:
+    print("Credential file exists =", os.path.isfile(credentials_path))
+else:
+    print("❌ GOOGLE_APPLICATION_CREDENTIALS is not set")
+
+print("Render secret directory exists =", os.path.isdir("/etc/secrets"))
+
+if os.path.isdir("/etc/secrets"):
+    print("Render secret files =", os.listdir("/etc/secrets"))
+
+print("======================================")
+
 # --- WINDOWS UTF-8 ENCODING FIX ---
 if sys.platform == "win32":
     if hasattr(sys.stdout, "reconfigure"):
