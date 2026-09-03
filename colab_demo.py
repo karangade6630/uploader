@@ -1797,43 +1797,54 @@ NO_MOVIE_WAIT_MINUTES = 20         # Wait time if no movies are found in DB
 #         # Default to True so the script doesn't permanently stall on a minor network hiccup
 #         return True
 
-
 def extract_urls_from_movie(movie_doc):
     """
-    Helper function to safely extract URLs whether stored as a 
-    single string or nested inside arrays/dictionaries.
+    Safely extracts all URLs from a movie document, handling both 
+    nested quality groups and direct field formats.
     """
     urls = set()
     
-    # 1. Direct 'url' field (string)
-    if isinstance(movie_doc.get("url"), str):
-        urls.add(movie_doc["url"])
+    # 1. Direct 'url' field if present
+    if isinstance(movie_doc.get("url"), str) and movie_doc["url"].strip():
+        urls.add(movie_doc["url"].strip())
         
-    # 2. 'links' field (list of strings or dicts)
-    links = movie_doc.get("links", [])
-    if isinstance(links, list):
-        for item in links:
-            if isinstance(item, str):
-                urls.add(item)
-            elif isinstance(item, dict) and item.get("url"):
-                urls.add(item["url"])
-                
+    # 2. 'links' field (handles both JSON string and native lists with quality groups)
+    raw = movie_doc.get("links")
+    if raw:
+        try:
+            groups = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(groups, list):
+                for group in groups:
+                    if isinstance(group, dict):
+                        for link_obj in group.get("links", []):
+                            if isinstance(link_obj, dict) and link_obj.get("url"):
+                                url = link_obj.get("url")
+                                if url:
+                                    urls.add(url.strip())
+                            elif isinstance(link_obj, str):
+                                urls.add(link_obj.strip())
+                    elif isinstance(group, str):
+                        urls.add(group.strip())
+        except Exception:
+            pass
+            
     return urls
 
 
 def _check_batch_unseen(seen_col, batch_urls):
     """
-    Queries MongoDB for only the URLs in the current 1,000-item batch.
+    Queries MongoDB for only the URLs in the current batch.
     Returns True if at least one URL in batch_urls is missing from seen_links.
     """
-    # Fetch only seen URLs that match the current batch
+    if seen_col is None or not batch_urls:
+        return False
+        
     seen_docs = seen_col.find(
         {"url": {"$in": list(batch_urls)}}, 
         {"url": 1, "_id": 0}
     )
     seen_urls_in_db = set(doc["url"] for doc in seen_docs if doc.get("url"))
     
-    # If any batch URL is missing from the database result, an unseen movie exists
     for url in batch_urls:
         if url not in seen_urls_in_db:
             return True
@@ -1843,43 +1854,37 @@ def _check_batch_unseen(seen_col, batch_urls):
 
 def has_unprocessed_movies(batch_size=1000):
     """
-    Checks MongoDB for unseen movies using 1,000-item chunks.
-    Exits early the moment an unprocessed link is detected.
+    Self-contained MongoDB check using batched chunks and early exit,
+    preventing linter scope errors.
     """
-    mongo_uri = os.environ.get("MONGO_URI")
-    if not mongo_uri:
-        print("⚠️ MONGO_URI env variable not set! Assuming movies exist.")
-        return True
-        
+    MONGO_URI = "mongodb+srv://karangade6630_db_user:PH3mTb73zv9yUZrw@movie-scraper-data.j3z6hjh.mongodb.net/"
+    
     client = None
     try:
-        client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
-        db = client['movie_scraper']  # Adjust DB name if different
-        seen_col = db["seen_links"]
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        db = client['movie_scraper']
+        seen_links_col = db["seen_links"]
         movies_col = db["movies"]
         
-        # Cursor configured to stream documents in network batches of 1,000
+        # Stream documents projecting only required fields to minimize RAM usage
         movie_cursor = movies_col.find({}, {"url": 1, "links": 1}).batch_size(batch_size)
         
         current_batch_urls = set()
         
         for movie in movie_cursor:
-            # Extract URLs from current movie doc
             extracted_urls = extract_urls_from_movie(movie)
             current_batch_urls.update(extracted_urls)
             
-            # Once we accumulate 1,000 URLs, check them against seen_links
             if len(current_batch_urls) >= batch_size:
-                if _check_batch_unseen(seen_col, current_batch_urls):
+                if _check_batch_unseen(seen_links_col, current_batch_urls):
                     client.close()
                     print("✅ DB Check: Unprocessed movies detected! (Early exit)")
                     return True
-                # Clear batch buffer for the next 1,000 items
                 current_batch_urls.clear()
         
-        # Check remaining URLs in the last partial batch (if any)
+        # Check remaining URLs in the final batch
         if current_batch_urls:
-            if _check_batch_unseen(seen_col, current_batch_urls):
+            if _check_batch_unseen(seen_links_col, current_batch_urls):
                 client.close()
                 print("✅ DB Check: Unprocessed movies detected in final batch!")
                 return True
@@ -1892,7 +1897,6 @@ def has_unprocessed_movies(batch_size=1000):
         print(f"❌ MongoDB Check Error: {e}")
         if client:
             client.close()
-        # Return True on errors so runner doesn't get stuck indefinitely
         return True
 
 
