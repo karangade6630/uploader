@@ -1860,6 +1860,535 @@ print(os.getcwd())
 # @title 6. Run Execution
 # run_pipeline_one_by_one(process_fn=my_download_handler, delay_seconds=1.0)
 
+# # @title 2. Configuration
+# import os
+# import sys
+# import time
+# import json
+# import subprocess
+# import requests
+# import re
+# import mimetypes
+# from urllib.parse import urlparse, unquote
+# from datetime import datetime
+# from colorama import Fore, Style, init as colorama_init
+
+# from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
+
+# colorama_init(autoreset=True)
+
+# # ====== TELEGRAM CONFIG ======
+# API_ID = 22219997
+# API_HASH = "e3840aec1ee4daefa979d3ceeecba323"
+# BOT_TOKEN = "7585583046:AAESix1g0gpKbpCsF-XFQcb0fTzvSfoXW2o"
+# CHAT_ID = "-1003349292789"
+
+# # Set this to True if you are running the Local Bot API server for >50MB files
+# USE_LOCAL_API = True
+
+# if USE_LOCAL_API:
+#     BOT_API = f"http://127.0.0.1:8081/bot{BOT_TOKEN}"
+# else:
+#     BOT_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+# # ====== PIPELINE CONFIG ======
+# DOWNLOAD_DIR = "/content/downloads"
+# os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+# MAX_RETRIES = 1
+# MAX_SIZE_BYTES_NORMAL = 2 * 1024 * 1024 * 1024  # 2GB limit for normal movies
+
+
+# # API_URL = "https://zzlgmmtn-3000.inc1.devtunnels.ms/api/movies"
+# # API_URL2 = "https://zzlgmmtn-3000.inc1.devtunnels.ms"
+
+# API_URL = "https://movie-scraper-v2.onrender.com/api/movies-to-download"
+# API_URL2 = "https://movie-scraper-v2.onrender.com"
+
+# SEEN_LINKS_API_ENDPOINT = f"{API_URL2}/api/seen-links"
+
+# # ====== LOGGER HELPERS ======
+# def log_info(msg): print(Fore.CYAN + "[INFO] " + Style.RESET_ALL + msg)
+# def log_success(msg): print(Fore.GREEN + "[OK] " + Style.RESET_ALL + msg)
+# def log_warn(msg): print(Fore.YELLOW + "[WARN] " + Style.RESET_ALL + msg)
+# def log_error(msg): print(Fore.RED + "[ERROR] " + Style.RESET_ALL + msg)
+
+# def human_size(n):
+#     for unit in ["B","KB","MB","GB","TB"]:
+#         if n < 1024: return f"{n:.2f} {unit}"
+#         n /= 1024
+#     return f"{n:.2f} PB"
+
+# def format_duration(seconds):
+#     h = int(seconds // 3600)
+#     m = int((seconds % 3600) // 60)
+#     s = int(seconds % 60)
+#     return f"{h:02d}:{m:02d}:{s:02d}"
+
+# # @title 3. File Processing & Streaming Optimization Helpers
+
+# def clean_filename(filename):
+#     name, ext = os.path.splitext(filename)
+#     name = name.replace(".", " ")
+#     name = " ".join(name.split())
+
+#     # Remove unwanted prefixes
+#     name = re.sub(r"^Movies4u[\s_.-]*", "", name, flags=re.IGNORECASE)
+#     name = re.sub(r"^\[.*?\]\s*", "", name, flags=re.IGNORECASE)
+#     name = re.sub(r"^Foo[\s_.-]*", "", name, flags=re.IGNORECASE)
+
+#     name = " ".join(name.split())
+#     return name.strip() + ext
+
+# def get_filename_from_headers(url):
+#     try:
+#         r = requests.head(url, allow_redirects=True, timeout=15)
+#         headers = r.headers
+#         if r.status_code >= 400 or "content-disposition" not in {k.lower() for k in headers.keys()}:
+#             r2 = requests.get(url, stream=True, timeout=15)
+#             headers = r2.headers
+#             r2.close()
+#     except requests.exceptions.RequestException as e:
+#         log_warn(f"Could not fetch headers, falling back to URL name.")
+#         headers = {}
+
+#     filename = None
+#     cd = headers.get("Content-Disposition") or headers.get("content-disposition")
+#     if cd:
+#         match = re.search(r"filename\*=(?:UTF-8'')?([^;]+)", cd, re.IGNORECASE)
+#         if not match: match = re.search(r'filename="?([^";]+)"?', cd, re.IGNORECASE)
+#         if match: filename = unquote(match.group(1).strip())
+
+#     if not filename:
+#         path = urlparse(url).path
+#         candidate = os.path.basename(path)
+#         if candidate and "." in candidate: filename = unquote(candidate)
+
+#     if not filename:
+#         content_type = headers.get("Content-Type", "").split(";")[0].strip()
+#         ext = mimetypes.guess_extension(content_type) or ".mp4"
+#         filename = f"video_{int(time.time())}{ext}"
+
+#     filename = re.sub(r'[\\/*?:"<>|]', "_", filename)
+#     filename = clean_filename(filename)
+
+#     if not os.path.splitext(filename)[1]:
+#         filename += ".mp4"
+#     return filename
+
+# def get_video_metadata(path):
+#     cmd = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", path]
+#     result = subprocess.run(cmd, capture_output=True, text=True)
+#     data = json.loads(result.stdout)
+#     video_stream = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
+#     duration = float(data.get("format", {}).get("duration", 0))
+#     width = int(video_stream.get("width", 0)) if video_stream else 0
+#     height = int(video_stream.get("height", 0)) if video_stream else 0
+#     size = int(data.get("format", {}).get("size", os.path.getsize(path)))
+#     return {"duration": int(duration), "width": width, "height": height, "size": size}
+
+# def get_video_mimetype(file_path: str) -> str:
+#     mime_map = {
+#         ".mp4": "video/mp4",
+#         ".mkv": "video/x-matroska",
+#         ".webm": "video/webm",
+#         ".mov": "video/quicktime"
+#     }
+#     ext = os.path.splitext(file_path)[1].lower()
+#     if ext in mime_map: return mime_map[ext]
+#     guessed, _ = mimetypes.guess_type(file_path)
+#     return guessed or "video/mp4"
+
+# def optimize_video_for_streaming(input_path: str) -> str:
+#     """
+#     Applies Fast Start (moov atom) using a temporary output file to prevent
+#     input/output collision errors, keeping all audio tracks and subtitles.
+#     """
+#     log_info("Applying Fast Start streaming optimization (keeping all audio & subtitles)...")
+
+#     base, ext = os.path.splitext(input_path)
+#     temp_output_path = f"{base}_temp_streamable{ext}"
+
+#     try:
+#         cmd = [
+#             "ffmpeg", "-y", "-v", "error",
+#             "-i", input_path,
+#             "-map", "0",              # Maps all streams (video, audio, subtitles)
+#             "-c", "copy",             # Stream copies everything without re-encoding
+#             "-movflags", "+faststart",
+#             temp_output_path
+#         ]
+
+#         result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+#         if result.returncode == 0 and os.path.exists(temp_output_path):
+#             log_success("Streaming optimization applied successfully!")
+#             os.remove(input_path)                 # Delete original file
+#             os.rename(temp_output_path, input_path) # Rename temp file to target filename
+#             return input_path
+#         else:
+#             log_warn(f"Optimization skipped. Proceeding with original file. {result.stderr}")
+#             if os.path.exists(temp_output_path): os.remove(temp_output_path)
+#             return input_path
+
+#     except Exception as e:
+#         log_error(f"FFmpeg exception: {e}")
+#         if os.path.exists(temp_output_path): os.remove(temp_output_path)
+#         return input_path
+
+
+# # @title 4. Downloader and Uploader Functions
+# MAX_RETRIES = 1
+# def download_file(url, dest_path):
+#     for attempt in range(1, 1 + 1):
+#         try:
+#             resume_byte_pos = os.path.getsize(dest_path) if os.path.exists(dest_path) else 0
+#             headers = {"Range": f"bytes={resume_byte_pos}-"} if resume_byte_pos else {}
+#             if resume_byte_pos: log_warn(f"Resuming from {human_size(resume_byte_pos)}")
+
+#             with requests.get(url, headers=headers, stream=True, timeout=30) as r:
+#                 r.raise_for_status()
+#                 total_size = int(r.headers.get("content-length", 0)) + resume_byte_pos
+#                 mode = "ab" if resume_byte_pos else "wb"
+#                 downloaded = resume_byte_pos
+#                 start_time = time.time()
+
+#                 with open(dest_path, mode) as f:
+#                     for chunk in r.iter_content(chunk_size=1024*1024):
+#                         if not chunk: continue
+#                         f.write(chunk)
+#                         downloaded += len(chunk)
+#                         elapsed = time.time() - start_time
+#                         speed = (downloaded - resume_byte_pos) / elapsed if elapsed > 0 else 0
+#                         percent = (downloaded / total_size * 100) if total_size else 0
+#                         eta = (total_size - downloaded) / speed if speed > 0 else 0
+
+#                         bar_len = 30
+#                         filled = int(bar_len * percent / 100)
+#                         bar = "█"*filled + "-"*(bar_len-filled)
+#                         sys.stdout.write(
+#                             f"\r{Fore.BLUE}⬇ Downloading{Style.RESET_ALL} [{bar}] "
+#                             f"{percent:5.1f}% | {human_size(downloaded)}/{human_size(total_size)} "
+#                             f"| {human_size(speed)}/s | ETA: {int(eta)}s  "
+#                         )
+#                         sys.stdout.flush()
+#                 print()
+#                 log_success(f"Download complete: {dest_path}")
+#                 return True
+#         except (requests.exceptions.RequestException, ConnectionError) as e:
+#             log_error(f"Attempt {attempt}/{MAX_RETRIES} failed: {e}")
+#             time.sleep(3 * attempt)
+#     return False
+
+# def download_poster_thumbnail(poster_url: str, video_path: str, timeout: int = 20) -> str | None:
+#     if not poster_url: return None
+#     thumb_path = video_path + "_thumb.jpg"
+#     try:
+#         resp = requests.get(poster_url, timeout=timeout, stream=True)
+#         resp.raise_for_status()
+#         with open(thumb_path, "wb") as f:
+#             for chunk in resp.iter_content(chunk_size=8192): f.write(chunk)
+#         return thumb_path
+#     except requests.exceptions.RequestException as e:
+#         log_warn(f"Poster download failed: {e}")
+#         return None
+
+# def upload_video(file_path, thumb_path, caption, duration, width, height):
+#     file_size = os.path.getsize(file_path)
+#     start_time = time.time()
+#     last_print = [0]
+#     video_mime = get_video_mimetype(file_path)
+
+#     def create_callback(monitor):
+#         def callback(m):
+#             now = time.time()
+#             if now - last_print[0] < 0.3 and m.bytes_read != m.len: return
+#             last_print[0] = now
+#             percent = m.bytes_read / m.len * 100
+#             elapsed = now - start_time
+#             speed = m.bytes_read / elapsed if elapsed > 0 else 0
+#             eta = (m.len - m.bytes_read) / speed if speed > 0 else 0
+#             bar_len = 30
+#             filled = int(bar_len * percent / 100)
+#             bar = "█"*filled + "-"*(bar_len-filled)
+#             sys.stdout.write(
+#                 f"\r{Fore.MAGENTA}⬆ Uploading{Style.RESET_ALL} [{bar}] "
+#                 f"{percent:5.1f}% | {human_size(m.bytes_read)}/{human_size(m.len)} "
+#                 f"| {human_size(speed)}/s | ETA: {int(eta)}s  "
+#             )
+#             sys.stdout.flush()
+#         return callback
+
+#     fields = {
+#         "chat_id": CHAT_ID,
+#         "caption": caption,
+#         "duration": str(duration),
+#         "width": str(width),
+#         "height": str(height),
+#         "supports_streaming": "true", # Mandatory API Flag for Streaming
+#         "video": (os.path.basename(file_path), open(file_path, "rb"), video_mime),
+#     }
+#     if thumb_path and os.path.exists(thumb_path):
+#         fields["thumb"] = (os.path.basename(thumb_path), open(thumb_path, "rb"), "image/jpeg")
+
+#     encoder = MultipartEncoder(fields=fields)
+#     monitor = MultipartEncoderMonitor(encoder, create_callback(encoder))
+
+#     try:
+#         response = requests.post(
+#             f"{BOT_API}/sendVideo",
+#             data=monitor,
+#             headers={"Content-Type": monitor.content_type},
+#             timeout=None
+#         )
+#         print()
+#         result = response.json()
+#         if result.get("ok"):
+#             log_success(f"Upload verified — message_id: {result['result']['message_id']}")
+#             return True
+#         else:
+#             log_error(f"Upload failed: {result}")
+#             return False
+#     except Exception as e:
+#         print()
+#         log_error(f"Upload exception: {e}")
+#         return False
+
+# # @title 5. API Fetching, Duplicate Checking & Main Pipeline
+
+# SKIP_EXTENSIONS = {".zip", ".rar", ".7z"}
+
+# def is_archive_file(url: str, filename: str) -> tuple[bool, str]:
+#     ext = os.path.splitext(filename)[1].lower()
+#     if ext in SKIP_EXTENSIONS:
+#         return True, f"extension '{ext}'"
+#     try:
+#         resp = requests.head(url, timeout=15, allow_redirects=True)
+#         ct = resp.headers.get("Content-Type", "").lower().split(";")[0].strip()
+#         if ct in {
+#             "application/zip",
+#             "application/x-zip-compressed",
+#             "application/x-rar-compressed",
+#             "application/x-7z-compressed",
+#         }:
+#             return True, f"content-type '{ct}'"
+#     except Exception:
+#         pass
+#     return False, ""
+
+# def get_remote_file_size(url: str) -> int | None:
+#     try:
+#         resp = requests.head(url, timeout=15, allow_redirects=True)
+#         if resp.headers.get("Content-Length", "").isdigit():
+#             return int(resp.headers.get("Content-Length"))
+
+#         resp = requests.get(url, timeout=15, stream=True, headers={"Range": "bytes=0-0"})
+#         if resp.headers.get("Content-Range", "").split("/")[-1].isdigit():
+#             return int(resp.headers.get("Content-Range").split("/")[-1])
+#     except Exception:
+#         pass
+#     return None
+
+# def is_within_size_limit(url: str):
+#     size = get_remote_file_size(url)
+#     return (False, None) if size is None else (size <= MAX_SIZE_BYTES_NORMAL, size)
+
+# def load_seen_links() -> set:
+#     try:
+#         resp = requests.get(SEEN_LINKS_API_ENDPOINT, timeout=15)
+#         if resp.status_code == 200 and resp.json().get("success"):
+#             return set(resp.json().get("links", []))
+#     except Exception:
+#         pass
+#     return set()
+
+# def mark_seen(link: str, seen: set):
+#     cleaned = link.strip()
+#     if not cleaned:
+#         return
+#     seen.add(cleaned)
+#     try:
+#         requests.post(SEEN_LINKS_API_ENDPOINT, json={"link": cleaned}, timeout=15)
+#     except Exception:
+#         pass
+
+# def extract_links(movie: dict) -> list[dict]:
+#     raw = movie.get("links")
+#     if not raw:
+#         return []
+#     try:
+#         groups = json.loads(raw) if isinstance(raw, str) else raw
+#     except Exception:
+#         return []
+
+#     flattened = []
+#     for group in groups:
+#         quality_label = group.get("quality", "")
+#         for link_obj in group.get("links", []):
+#             if link_obj.get("url"):
+#                 flattened.append({
+#                     "quality_label": quality_label,
+#                     "text": link_obj.get("text", ""),
+#                     "url": link_obj.get("url"),
+#                 })
+#     return flattened
+
+# def run_pipeline(url: str, movie: dict = None) -> tuple[bool, bool]:
+#     """
+#     Returns:
+#         (success: bool, should_mark_seen: bool)
+#     """
+#     dest_path = None
+#     thumb_path = None
+#     try:
+#         filename = get_filename_from_headers(url)
+#         is_archive, reason = is_archive_file(url, filename)
+#         if is_archive:
+#             log_warn(f"Skipping {filename}: detected as archive ({reason}).")
+#             return False, True  # Archive file -> Mark seen immediately
+
+#         ok, size_bytes = is_within_size_limit(url)
+#         if size_bytes is not None and not ok:
+#             log_warn(f"Skipping {filename}: Size ({human_size(size_bytes)}) exceeds 2GB limit.")
+#             return False, True  # Mark seen so it's not retried
+
+#         if size_bytes is None:
+#             log_warn(f"Could not verify file size for {filename}. Proceeding with attempt...")
+
+#         dest_path = os.path.join(DOWNLOAD_DIR, filename)
+
+#         # Remove existing partial file from prior attempt if present
+#         if os.path.exists(dest_path):
+#             try:
+#                 os.remove(dest_path)
+#             except Exception:
+#                 pass
+
+#         if not download_file(url, dest_path):
+#             return False, False  # Download failed
+
+#         # Apply FastStart streaming optimization
+#         dest_path = optimize_video_for_streaming(dest_path)
+
+#         # Grab Metadata after optimization / compression
+#         meta = get_video_metadata(dest_path)
+#         poster_url = movie.get("poster_url") if movie else None
+#         thumb_path = download_poster_thumbnail(poster_url, dest_path)
+
+#         caption = (
+#             f"📁 Name: {os.path.basename(dest_path)}\n"
+#             f"📦 Size: {human_size(meta['size'])}\n"
+#             f"🎥 Resolution: {meta['width']}×{meta['height']}\n"
+#             f"⏱ Duration: {format_duration(meta['duration'])}\n"
+#         )
+
+#         success = upload_video(
+#             dest_path, thumb_path, caption, meta["duration"], meta["width"], meta["height"]
+#         )
+
+#         if success:
+#             return True, True  # Success -> Mark seen
+#         return False, False  # Upload failed
+
+#     except Exception as e:
+#         log_warn(f"Pipeline error for {url}: {e}")
+#         return False, False
+#     finally:
+#         # Guarantee cleanup after every attempt
+#         try:
+#             if dest_path and os.path.exists(dest_path):
+#                 os.remove(dest_path)
+#             if thumb_path and os.path.exists(thumb_path):
+#                 os.remove(thumb_path)
+#         except Exception:
+#             pass
+
+# def run_pipeline_one_by_one(process_fn=None, delay_seconds: float = 0, max_retries: int = 1):
+#     seen = load_seen_links()
+#     try:
+#         movies = requests.get(API_URL, timeout=30).json().get("movies", [])
+#     except Exception:
+#         movies = []
+
+#     # Sort movies by page_num ASC, id ASC
+#     movies.sort(key=lambda m: (m.get("page_num", 9999), m.get("id", 0)))
+
+#     all_movie_links = []
+#     for movie in movies:
+#         for link_info in extract_links(movie):
+#             all_movie_links.append((movie, link_info))
+
+#     total_links = len(all_movie_links)
+
+#     # Filter out already seen links in bulk upfront
+#     unseen_links = [
+#         (movie, link_info)
+#         for movie, link_info in all_movie_links
+#         if link_info["url"] not in seen
+#     ]
+
+#     skipped_count = total_links - len(unseen_links)
+#     print(f"Total links fetched: {total_links}")
+#     print(f"Already processed (skipped): {skipped_count}")
+#     print(f"Remaining to process: {len(unseen_links)}\n")
+
+#     # Process remaining links one by one
+#     for i, (movie, link_info) in enumerate(unseen_links, 1):
+#         url = link_info["url"]
+
+#         if url in seen:
+#             continue
+
+#         print(
+#             f"[{i}/{len(unseen_links)}] Processing (Pg {movie.get('page_num', '?')}): {movie.get('title')} [{link_info.get('quality_label')}]"
+#         )
+
+#         success = False
+#         should_mark_seen = False
+
+#         for attempt in range(1, max_retries + 1):
+#             try:
+#                 res = process_fn(movie, link_info) if process_fn else (False, False)
+
+#                 if isinstance(res, tuple):
+#                     success, should_mark_seen = res
+#                 elif isinstance(res, bool):
+#                     success, should_mark_seen = res, res
+#                 else:
+#                     success, should_mark_seen = False, False
+
+#                 if success:
+#                     mark_seen(url, seen)
+#                     print("SUCCESS: Uploaded and marked as seen.\n")
+#                     break
+
+#                 if should_mark_seen:
+#                     mark_seen(url, seen)
+#                     print("SKIPPED & MARKED SEEN: Archive file.\n")
+#                     break
+
+#                 print(f"Attempt {attempt}/{max_retries} failed.")
+#             except Exception as e:
+#                 print(f"Attempt {attempt}/{max_retries} ERROR: {e}")
+
+#             if attempt < max_retries:
+#                 time.sleep(2)
+
+#         if not success and not should_mark_seen:
+#             mark_seen(url, seen)
+#             print("SKIPPED / FAILED: File exceeded size limit or error. Marked seen to prevent future retries.\n")
+
+#         if delay_seconds:
+#             time.sleep(delay_seconds)
+
+# def my_download_handler(movie: dict, link_info: dict):
+#     return run_pipeline(link_info["url"], movie=movie)
+
+# # @title 6. Run Execution
+# run_pipeline_one_by_one(process_fn=my_download_handler, delay_seconds=1.0)
+
+
+!pip install pymongo dnspython
+
 # @title 2. Configuration
 import os
 import sys
@@ -1872,8 +2401,22 @@ import mimetypes
 from urllib.parse import urlparse, unquote
 from datetime import datetime
 from colorama import Fore, Style, init as colorama_init
+from pymongo import MongoClient
 
 from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
+
+# ====== MONGODB CONFIG ======
+MONGO_URI = "mongodb+srv://karangade6630_db_user:PH3mTb73zv9yUZrw@movie-scraper-data.j3z6hjh.mongodb.net/"
+try:
+    mongo_client = MongoClient(MONGO_URI)
+    db = mongo_client['movie_scraper']
+    seen_links_col = db["seen_links"]
+    movies_col = db["movies"]
+except Exception as e:
+    print(f"[ERROR] Failed to connect to MongoDB: {e}")
+    mongo_client = None
+    seen_links_col = None
+    movies_col = None
 
 colorama_init(autoreset=True)
 
@@ -1898,13 +2441,7 @@ MAX_RETRIES = 1
 MAX_SIZE_BYTES_NORMAL = 2 * 1024 * 1024 * 1024  # 2GB limit for normal movies
 
 
-# API_URL = "https://zzlgmmtn-3000.inc1.devtunnels.ms/api/movies"
-# API_URL2 = "https://zzlgmmtn-3000.inc1.devtunnels.ms"
-
-API_URL = "https://movie-scraper-v2.onrender.com/api/movies"
-API_URL2 = "https://movie-scraper-v2.onrender.com"
-
-SEEN_LINKS_API_ENDPOINT = f"{API_URL2}/api/seen-links"
+# Fully migrated to MongoDB (movies_col & seen_links_col)
 
 # ====== LOGGER HELPERS ======
 def log_info(msg): print(Fore.CYAN + "[INFO] " + Style.RESET_ALL + msg)
@@ -2194,11 +2731,11 @@ def is_within_size_limit(url: str):
 
 def load_seen_links() -> set:
     try:
-        resp = requests.get(SEEN_LINKS_API_ENDPOINT, timeout=15)
-        if resp.status_code == 200 and resp.json().get("success"):
-            return set(resp.json().get("links", []))
-    except Exception:
-        pass
+        if seen_links_col is not None:
+            docs = seen_links_col.find({})
+            return set(doc.get("url") for doc in docs if doc.get("url"))
+    except Exception as e:
+        log_warn(f"Error loading seen links from MongoDB: {e}")
     return set()
 
 def mark_seen(link: str, seen: set):
@@ -2207,9 +2744,14 @@ def mark_seen(link: str, seen: set):
         return
     seen.add(cleaned)
     try:
-        requests.post(SEEN_LINKS_API_ENDPOINT, json={"link": cleaned}, timeout=15)
-    except Exception:
-        pass
+        if seen_links_col is not None:
+            seen_links_col.update_one(
+                {"url": cleaned},
+                {"$set": {"url": cleaned, "last_updated": datetime.now()}},
+                upsert=True
+            )
+    except Exception as e:
+        log_warn(f"Error marking link as seen in MongoDB: {e}")
 
 def extract_links(movie: dict) -> list[dict]:
     raw = movie.get("links")
@@ -2304,81 +2846,114 @@ def run_pipeline(url: str, movie: dict = None) -> tuple[bool, bool]:
 
 def run_pipeline_one_by_one(process_fn=None, delay_seconds: float = 0, max_retries: int = 1):
     seen = load_seen_links()
-    try:
-        movies = requests.get(API_URL, timeout=30).json().get("movies", [])
-    except Exception:
-        movies = []
+    if movies_col is not None:
+        try:
+            total_movies_count = movies_col.count_documents({})
+            print(f"Total movies in MongoDB: {total_movies_count}")
+        except Exception as e:
+            log_warn(f"Error counting movies in MongoDB: {e}")
+            return
+    else:
+        print("Movies collection not available.")
+        return
 
-    # Sort movies by page_num ASC, id ASC
-    movies.sort(key=lambda m: (m.get("page_num", 9999), m.get("id", 0)))
+    print("Fetching movies page-wise (starting from page_num 1 upwards) and extracting links...")
+    try:
+        cursor = movies_col.find({}).sort([("page_num", 1), ("id", 1)])
+        all_movies = list(cursor)
+    except Exception as e:
+        log_warn(f"Error fetching movies from MongoDB: {e}")
+        all_movies = []
+
+    unique_pages = set(m.get('page_num') for m in all_movies if m.get('page_num') is not None)
+    total_pages_count = len(unique_pages)
+    print(f"Total Pages Found: {total_pages_count}")
 
     all_movie_links = []
-    for movie in movies:
+    for movie in all_movies:
         for link_info in extract_links(movie):
             all_movie_links.append((movie, link_info))
 
-    total_links = len(all_movie_links)
+    total_links_count = len(all_movie_links)
+    print(f"Total links found across all movies: {total_links_count}\n")
 
-    # Filter out already seen links in bulk upfront
-    unseen_links = [
-        (movie, link_info)
-        for movie, link_info in all_movie_links
-        if link_info["url"] not in seen
-    ]
+    batch_size = 1000
+    total_processed_count = 0
+    total_skipped_count = 0
 
-    skipped_count = total_links - len(unseen_links)
-    print(f"Total links fetched: {total_links}")
-    print(f"Already processed (skipped): {skipped_count}")
-    print(f"Remaining to process: {len(unseen_links)}\n")
+    for start_idx in range(0, total_links_count, batch_size):
+        batch_links = all_movie_links[start_idx:start_idx + batch_size]
 
-    # Process remaining links one by one
-    for i, (movie, link_info) in enumerate(unseen_links, 1):
-        url = link_info["url"]
+        unseen_batch_links = [
+            (movie, link_info)
+            for movie, link_info in batch_links
+            if link_info["url"] not in seen
+        ]
 
-        if url in seen:
+        skipped_count = len(batch_links) - len(unseen_batch_links)
+        total_skipped_count += skipped_count
+
+        if not unseen_batch_links:
             continue
 
-        print(
-            f"[{i}/{len(unseen_links)}] Processing (Pg {movie.get('page_num', '?')}): {movie.get('title')} [{link_info.get('quality_label')}]"
-        )
+        for i, (movie, link_info) in enumerate(unseen_batch_links, 1):
+            url = link_info["url"]
 
-        success = False
-        should_mark_seen = False
+            if url in seen:
+                continue
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                res = process_fn(movie, link_info) if process_fn else (False, False)
+            print(
+                f"[{i}/{len(unseen_batch_links)}] Processing (Page {movie.get('page_num', '?')}): {movie.get('title')} [{link_info.get('quality_label')}]"
+            )
 
-                if isinstance(res, tuple):
-                    success, should_mark_seen = res
-                elif isinstance(res, bool):
-                    success, should_mark_seen = res, res
-                else:
-                    success, should_mark_seen = False, False
+            success = False
+            should_mark_seen = False
 
-                if success:
-                    mark_seen(url, seen)
-                    print("SUCCESS: Uploaded and marked as seen.\n")
-                    break
+            for attempt in range(1, max_retries + 1):
+                try:
+                    res = process_fn(movie, link_info) if process_fn else (False, False)
 
-                if should_mark_seen:
-                    mark_seen(url, seen)
-                    print("SKIPPED & MARKED SEEN: Archive file.\n")
-                    break
+                    if isinstance(res, tuple):
+                        success, should_mark_seen = res
+                    elif isinstance(res, bool):
+                        success, should_mark_seen = res, res
+                    else:
+                        success, should_mark_seen = False, False
 
-                print(f"Attempt {attempt}/{max_retries} failed.")
-            except Exception as e:
-                print(f"Attempt {attempt}/{max_retries} ERROR: {e}")
+                    if success:
+                        mark_seen(url, seen)
+                        total_processed_count += 1
+                        print("SUCCESS: Uploaded and marked as seen.\n")
+                        break
 
-            if attempt < max_retries:
-                time.sleep(2)
+                    if should_mark_seen:
+                        mark_seen(url, seen)
+                        print("SKIPPED & MARKED SEEN: Archive file.\n")
+                        break
 
-        if not success and not should_mark_seen:
-            mark_seen(url, seen)
-            print("SKIPPED / FAILED: File exceeded size limit or error. Marked seen to prevent future retries.\n")
+                    print(f"Attempt {attempt}/{max_retries} failed.")
+                except Exception as e:
+                    print(f"Attempt {attempt}/{max_retries} ERROR: {e}")
 
-        if delay_seconds:
-            time.sleep(delay_seconds)
+                if attempt < max_retries:
+                    time.sleep(2)
+
+            if not success and not should_mark_seen:
+                mark_seen(url, seen)
+                print("SKIPPED / FAILED: File exceeded size limit or error. Marked seen to prevent future retries.\n")
+
+            if delay_seconds:
+                time.sleep(delay_seconds)
+
+    print(f"\n==============================")
+    print(f"PIPELINE SUMMARY")
+    print(f"==============================")
+    print(f"Total Pages: {total_pages_count}")
+    print(f"Total Movies: {total_movies_count}")
+    print(f"Total Links Checked: {total_links_count}")
+    print(f"Total Already Processed (Skipped): {total_skipped_count}")
+    print(f"Total Newly Processed/Uploaded: {total_processed_count}")
+    print(f"==============================\n")
 
 def my_download_handler(movie: dict, link_info: dict):
     return run_pipeline(link_info["url"], movie=movie)
@@ -2386,4 +2961,11 @@ def my_download_handler(movie: dict, link_info: dict):
 # @title 6. Run Execution
 run_pipeline_one_by_one(process_fn=my_download_handler, delay_seconds=1.0)
 
+
+!nohup /content/telegram-bot-api \
+  --api-id=22219997 \
+  --api-hash=e3840aec1ee4daefa979d3ceeecba323 \
+  --local \
+  --http-port=8081 \
+  > telegram.log 2>&1 &
 
