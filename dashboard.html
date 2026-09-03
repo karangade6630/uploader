@@ -242,6 +242,30 @@
     .term-line.warn { color:var(--yellow); }
     .term-line.err  { color:var(--red); }
     .term-line.info { color:var(--cyan); }
+
+    /* ── MongoDB stats widget ── */
+    .db-status-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 11px; font-weight: 700; padding: 3px 10px;
+      border-radius: 20px; border: 1px solid; transition: all 0.4s;
+    }
+    .db-status-pill.connected    { background:rgba(105,219,124,0.1); color:var(--green);  border-color:rgba(105,219,124,0.3); }
+    .db-status-pill.disconnected { background:rgba(255,107,129,0.1); color:var(--red);    border-color:rgba(255,107,129,0.3); }
+    .db-status-pill.checking     { background:rgba(255,211,105,0.1); color:var(--yellow); border-color:rgba(255,211,105,0.3); }
+    .db-stats-row { display:flex; justify-content:space-between; align-items:center; font-size:11px; color:var(--text-muted); margin-bottom:5px; }
+    .db-stats-row .val { color:var(--text-primary); font-weight:600; font-family:'JetBrains Mono',monospace; }
+    .db-next-movie { font-size:11px; color:var(--text-muted); margin-top:8px; padding:8px; background:var(--bg-card); border-radius:6px; border:1px solid var(--border); }
+    .db-next-movie .label { font-size:10px; text-transform:uppercase; letter-spacing:0.06em; color:var(--text-dim); margin-bottom:3px; }
+    .db-next-movie .title { color:var(--cyan); font-size:11px; word-break:break-word; line-height:1.4; }
+    .btn-check-db {
+      margin-top:10px; width:100%; padding:6px 0; background:none;
+      border:1px solid rgba(79,163,255,0.3); border-radius:6px;
+      color:var(--blue); font-size:11px; font-weight:600; cursor:pointer;
+      transition:all 0.2s; letter-spacing:0.04em;
+    }
+    .btn-check-db:hover { background:rgba(79,163,255,0.08); border-color:var(--blue); }
+    .btn-check-db:active { transform:scale(0.97); }
+    .btn-check-db:disabled { opacity:0.35; cursor:not-allowed; }
   </style>
 </head>
 <body>
@@ -355,6 +379,24 @@
         <div class="count-box"><div class="n" id="errCount" style="color:var(--red)">0</div><div class="l">Errors</div></div>
         <div class="count-box"><div class="n" id="okCount" style="color:var(--green)">0</div><div class="l">Successes</div></div>
       </div>
+    </div>
+
+    <!-- MongoDB Live Status -->
+    <div class="sidebar-section">
+      <div class="section-title">&#128196; MongoDB Status</div>
+      <div style="margin-bottom:8px;">
+        <span class="db-status-pill checking" id="dbStatusPill">&#9679; Checking...</span>
+      </div>
+      <div class="db-stats-row"><span>Total Movies</span><span class="val" id="dbTotalMovies">-</span></div>
+      <div class="db-stats-row"><span>Seen Links</span><span class="val" id="dbSeenLinks">-</span></div>
+      <div class="db-stats-row" style="color:var(--orange);"><span>Unprocessed</span><span class="val" id="dbUnprocessed" style="color:var(--orange);">-</span></div>
+      <div class="db-next-movie" id="dbNextMovieWrap">
+        <div class="label">Next Movie to Process</div>
+        <div class="title" id="dbNextMovieTitle">Loading...</div>
+        <div style="margin-top:3px;font-size:10px;color:var(--text-dim)">Page <span id="dbNextMoviePage">-</span></div>
+      </div>
+      <button class="btn-check-db" id="btnCheckDb" onclick="triggerDbCheck()">&#128270; Check DB Now</button>
+      <div style="margin-top:6px;font-size:10px;color:var(--text-dim);text-align:right;" id="dbLastChecked"></div>
     </div>
   </aside>
 
@@ -566,10 +608,69 @@ function addTermLine(text, cls='') {
 }
 function clearTerminal() { document.getElementById('termBody').innerHTML = ''; }
 
+// ─── MongoDB widget ───────────────────────────────────────────────────────────
+function applyDbState(db) {
+  const pill = document.getElementById('dbStatusPill');
+  if (db.connected) {
+    pill.className = 'db-status-pill connected';
+    pill.innerHTML = '&#128994; Connected';
+  } else if (db.error) {
+    pill.className = 'db-status-pill disconnected';
+    pill.innerHTML = '&#128308; Error';
+  } else {
+    pill.className = 'db-status-pill checking';
+    pill.innerHTML = '&#9899; Checking...';
+  }
+  document.getElementById('dbTotalMovies').textContent =
+    db.total_movies != null ? db.total_movies.toLocaleString() : '-';
+  document.getElementById('dbSeenLinks').textContent =
+    db.seen_links != null ? db.seen_links.toLocaleString() : '-';
+  document.getElementById('dbUnprocessed').textContent =
+    db.unprocessed_count != null ? db.unprocessed_count.toLocaleString() : '-';
+  if (db.next_movie_title) {
+    document.getElementById('dbNextMovieTitle').textContent = db.next_movie_title;
+    document.getElementById('dbNextMoviePage').textContent = db.next_movie_page ?? '-';
+    document.getElementById('dbNextMovieWrap').style.display = 'block';
+  } else {
+    document.getElementById('dbNextMovieTitle').textContent = 'None — all caught up!';
+    document.getElementById('dbNextMoviePage').textContent = '-';
+  }
+  if (db.last_checked) {
+    try {
+      document.getElementById('dbLastChecked').textContent =
+        'Updated ' + new Date(db.last_checked).toLocaleTimeString('en-GB', {hour12:false});
+    } catch(_) {}
+  }
+}
+
+async function triggerDbCheck() {
+  const btn = document.getElementById('btnCheckDb');
+  const pill = document.getElementById('dbStatusPill');
+  btn.disabled = true;
+  btn.textContent = 'Checking...';
+  pill.className = 'db-status-pill checking';
+  pill.innerHTML = '&#9899; Checking...';
+  try {
+    await fetch('/control/check-db', { method: 'POST' });
+    addTermLine('[dashboard] DB check triggered in background.', 'info');
+  } catch(e) {
+    addTermLine('[dashboard] DB check failed: ' + e, 'err');
+  }
+  setTimeout(() => { btn.disabled = false; btn.textContent = '\u{1F50E} Check DB Now'; }, 5000);
+}
+
+// Load DB status on page open
+fetch('/api/db-status').then(r => r.json()).then(applyDbState).catch(() => {});
+
 // ─── Process event ────────────────────────────────────────────────────────────
 function processEvent(ev) {
   state.totalEvents++;
   document.getElementById('hdrEvents').textContent = state.totalEvents;
+
+  if (ev.type === 'db_status') {
+    applyDbState(ev);
+    return;  // Don't add db_status as a feed card
+  }
 
   if (ev.type === 'ctrl_state') {
     applyCtrlState(ev.state || 'idle');
