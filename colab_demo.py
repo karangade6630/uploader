@@ -1,5 +1,4 @@
 # gdown "https://drive.google.com/uc?id=1MjeMi9IXSjhaE1dNQxO5vDIkTtLiET3Y" -O notebook.ipynb 
-
 """
 colab_demo.py
 -------------
@@ -9,6 +8,17 @@ Orchestrator that:
   3. Streams all stdout/stderr live to the terminal AND to the dashboard
   4. Checks MongoDB before each cycle so we don't spin the VM needlessly
   5. Respects Pause / Stop commands from the live web dashboard
+
+FIXES in this version
+---------------------
+* "Daily limit reached" no longer spams the log. Root cause: when Stop/Pause
+  was pressed, _interruptible_sleep() returned instantly, the loop did
+  `continue`, hit the daily-cap branch again, emitted the message again,
+  returned instantly again ... an infinite tight loop.
+  Now: stop/pause is checked FIRST in every iteration, the sleep reports
+  whether it was interrupted, and the daily-cap message is emitted ONCE.
+* Stop now exits the runner thread cleanly from any sleep.
+* MongoDB URI is no longer hardcoded. Set the MONGO_URI environment variable.
 """
 
 import json
@@ -78,11 +88,8 @@ MIN_SLEEP_AFTER_RUN_MINUTES = 45
 MAX_SLEEP_AFTER_RUN_MINUTES = 120
 NO_MOVIE_WAIT_MINUTES       = 20
 
-# MongoDB  (hardcoded fallback; prefer env var MONGO_URI in production)
-_MONGO_URI = os.environ.get(
-    "MONGO_URI",
-    "mongodb+srv://karangade6630_db_user:PH3mTb73zv9yUZrw@movie-scraper-data.j3z6hjh.mongodb.net/"
-)
+# MongoDB - URI MUST come from the environment (never commit credentials)
+_MONGO_URI = os.environ.get("MONGO_URI", "").strip()
 MONGO_DB = "movie_scraper"
 
 # ---------------------------------------------------------------------------
@@ -104,11 +111,32 @@ def _emit(event_type: str, **kwargs):
             pass
 
 
+def _should_stop() -> bool:
+    if not _DASHBOARD_AVAILABLE:
+        return False
+    try:
+        return bool(_ds.should_stop())
+    except Exception:
+        return False
+
+
+def _wait_if_paused() -> bool:
+    """Blocks while paused. Returns False if the run should abort."""
+    if not _DASHBOARD_AVAILABLE:
+        return True
+    try:
+        return bool(_ds.wait_if_paused())
+    except Exception:
+        return True
+
+
 # ---------------------------------------------------------------------------
 # MONGODB HELPERS
 # ---------------------------------------------------------------------------
 
 def _get_mongo_client() -> MongoClient:
+    if not _MONGO_URI:
+        raise RuntimeError("MONGO_URI environment variable is not set")
     return MongoClient(_MONGO_URI, serverSelectionTimeoutMS=7000)
 
 
@@ -116,7 +144,6 @@ def _extract_all_urls(movie_doc: dict) -> set:
     """Extract every download URL from a movie document's `links` field."""
     urls: set = set()
 
-    # Direct top-level url field
     if isinstance(movie_doc.get("url"), str) and movie_doc["url"].strip():
         urls.add(movie_doc["url"].strip())
 
@@ -156,7 +183,6 @@ def _check_batch_unseen(seen_col, batch_urls: set) -> bool:
 def has_unprocessed_movies(batch_size: int = 1000) -> bool:
     """
     Fast streaming check: returns True as soon as a single unseen URL is found.
-    Uses batched $in queries against seen_links (which has a unique index on url).
     """
     client = None
     try:
@@ -218,14 +244,13 @@ def get_mongo_overview() -> dict:
         total_movies = movies_col.count_documents({})
         total_seen   = seen_col.count_documents({})
 
-        # Load all seen URLs into a set (4,632 docs ~ 2-3 MB, fast)
         seen_urls: set = set(
             d["url"] for d in seen_col.find({}, {"url": 1, "_id": 0}) if "url" in d
         )
 
-        unprocessed_count   = 0
-        first_movie_title   = None
-        first_movie_page    = None
+        unprocessed_count = 0
+        first_movie_title = None
+        first_movie_page  = None
 
         cursor = movies_col.find(
             {}, {"title": 1, "links": 1, "url": 1, "page_num": 1}
@@ -266,7 +291,6 @@ def get_mongo_overview() -> dict:
             except Exception:
                 pass
 
-    # Broadcast to dashboard
     _emit("db_status", **result)
     if _DASHBOARD_AVAILABLE:
         try:
@@ -472,12 +496,12 @@ def stream_subprocess_output(process, on_line=None):
     """
     buf = ""
     while True:
-        if _DASHBOARD_AVAILABLE and _ds.should_stop():
+        if _should_stop():
             break
         chunk = process.stdout.read(4096)
         if not chunk:
             break
-        if _DASHBOARD_AVAILABLE and _ds.should_stop():
+        if _should_stop():
             break
         buf += chunk.replace("\r\n", "\n")
 
@@ -488,14 +512,12 @@ def stream_subprocess_output(process, on_line=None):
                 break
 
             if idx_n != -1 and (idx_r == -1 or idx_n < idx_r):
-                # Full newline-terminated line
                 line, buf = buf[:idx_n], buf[idx_n + 1:]
                 sys.stdout.write(f"\r{line}\n")
                 _parse_and_emit_line(line)
                 if on_line:
                     on_line(line)
             else:
-                # Carriage-return (in-place overwrite progress line)
                 line, buf = buf[:idx_r], buf[idx_r + 1:]
                 sys.stdout.write(f"\r{line.ljust(80)}")
                 _parse_and_emit_line(line)
@@ -578,20 +600,21 @@ def cleanup_and_verify_sessions():
                 found_ids.add(m.group(1))
             if found_ids:
                 with ThreadPoolExecutor(max_workers=5) as executor:
-                    executor.map(stop_session, filter(None, found_ids))
+                    list(executor.map(stop_session, filter(None, found_ids)))
     except Exception:
         pass
 
 
 def run_remote_colab_cycle(cycle_num: int, runs_today: int) -> bool:
-    """Runs one full Colab cycle. Returns True on success / expected completion."""
+    """Runs one full Colab cycle. Returns True on success / expected completion,
+    False if it was stopped by the user."""
     print(f"\n{'='*40}\nCYCLE START (Run {runs_today}/{MAX_DAILY_RUNS} for Today)\n{'='*40}")
     _emit("cycle_start",
           msg=f"Cycle #{cycle_num} starting (Run {runs_today}/{MAX_DAILY_RUNS} today)",
           cycle=cycle_num, total=MAX_DAILY_RUNS)
 
     cleanup_and_verify_sessions()
-    if _DASHBOARD_AVAILABLE and _ds.should_stop():
+    if _should_stop():
         return False
 
     exec_command = [
@@ -638,13 +661,16 @@ def run_remote_colab_cycle(cycle_num: int, runs_today: int) -> bool:
                           session_id=session_id)
 
         stream_subprocess_output(process, on_line=_handle_line)
-        process.wait()
 
-        if _DASHBOARD_AVAILABLE and _ds.should_stop():
+        # If the user pressed Stop, make sure the process is really dead
+        if _should_stop():
+            _kill_process_tree(process.pid)
             return False
 
+        process.wait()
+
         if watchdog_fired.is_set():
-            print(f"\nCycle force-terminated by watchdog.")
+            print("\nCycle force-terminated by watchdog.")
             _emit("warn", msg="Cycle force-terminated by watchdog.")
         elif process.returncode == 0:
             print("\nCloud execution completed successfully!")
@@ -680,31 +706,49 @@ def run_remote_colab_cycle(cycle_num: int, runs_today: int) -> bool:
 # SCHEDULING RUNNER
 # ---------------------------------------------------------------------------
 
-def _interruptible_sleep(total_seconds: float):
-    """Sleeps in 0.25s intervals so dashboard stop/pause is immediately responsive."""
-    steps = int(total_seconds * 4)
-    for _ in range(steps):
-        if _DASHBOARD_AVAILABLE:
-            if _ds.should_stop():
-                return
-            if not _ds.wait_if_paused():
-                return
+def _interruptible_sleep(total_seconds: float) -> bool:
+    """
+    Sleeps in 0.25s steps so Stop/Pause is immediately responsive.
+    Returns True if the full sleep completed, False if interrupted by Stop.
+    (Pause simply blocks inside wait_if_paused and then continues.)
+    """
+    deadline = time.monotonic() + max(0.0, total_seconds)
+    while time.monotonic() < deadline:
+        if _should_stop():
+            return False
+        if not _wait_if_paused():
+            return False
         time.sleep(0.25)
+    return True
+
+
+def _seconds_until_next_day(minute: int = 5) -> tuple[float, datetime.datetime]:
+    now = datetime.datetime.now()
+    target = (now + datetime.timedelta(days=1)).replace(
+        hour=0, minute=minute, second=0, microsecond=0
+    )
+    return (target - now).total_seconds(), target
+
+
+def _finish_runner():
+    global _runner_thread
+    if _DASHBOARD_AVAILABLE:
+        try:
+            _ds.mark_idle()
+        except Exception:
+            pass
+    with _runner_lock:
+        _runner_thread = None
 
 
 def _run_all_cycles():
-    global _runner_thread
-
     try:
         convert_ipynb_to_py(NOTEBOOK_FILE, TARGET_FILE)
         cleanup_and_verify_sessions()
     except Exception as e:
         print(f"Startup error: {e}")
         _emit("error", msg=f"Startup error: {e}")
-        if _DASHBOARD_AVAILABLE:
-            _ds.mark_idle()
-        with _runner_lock:
-            _runner_thread = None
+        _finish_runner()
         return
 
     runs_today      = 0
@@ -712,49 +756,43 @@ def _run_all_cycles():
     cycle_num_total = 0
 
     while True:
+        # 0. Stop / Pause check FIRST (this is what prevents the spam loop)
+        if _should_stop():
+            break
+        if not _wait_if_paused():
+            break
+
         # 1. Day flip
         today = datetime.date.today()
         if today != current_day:
             current_day = today
             runs_today  = 0
             print(f"\nNew day! Resetting run counter to 0/{MAX_DAILY_RUNS}.")
+            _emit("log", msg=f"New day - run counter reset to 0/{MAX_DAILY_RUNS}")
 
-        # 2. Daily cap — sleep until midnight
+        # 2. Daily cap - announce ONCE, then sleep until just after midnight
         if runs_today >= MAX_DAILY_RUNS:
-            now      = datetime.datetime.now()
-            tomorrow = now + datetime.timedelta(days=1)
-            midnight = datetime.datetime(
-                year=tomorrow.year, month=tomorrow.month,
-                day=tomorrow.day, hour=0, minute=5
-            )
-            sleep_s = (midnight - now).total_seconds()
+            sleep_s, wake_at = _seconds_until_next_day(minute=5)
             print(f"\nReached {MAX_DAILY_RUNS} runs today.")
-            print(f"Sleeping until {midnight.strftime('%Y-%m-%d %H:%M')}...")
+            print(f"Sleeping until {wake_at.strftime('%Y-%m-%d %H:%M')}...")
             _emit("intermission",
-                  msg=f"Daily limit reached. Sleeping until {midnight.strftime('%H:%M')}",
+                  msg=f"Daily limit reached. Sleeping until {wake_at.strftime('%H:%M')}",
                   delay=int(sleep_s))
-            _interruptible_sleep(sleep_s)
-            continue
+            if not _interruptible_sleep(sleep_s):
+                break          # stopped by user -> exit cleanly, no re-loop
+            continue           # woke up normally -> day flip resets the counter
 
-        # 3. Stop / Pause check
-        if _DASHBOARD_AVAILABLE:
-            if _ds.should_stop():
-                break
-            if not _ds.wait_if_paused():
-                break
-
-        # 4. MongoDB quick-check before burning a VM slot
+        # 3. MongoDB quick-check before burning a VM slot
         print("\nChecking MongoDB for unprocessed movies...")
         _emit("log", msg="Checking MongoDB for unprocessed movies...")
 
         if has_unprocessed_movies():
-            # Full DB overview in background (non-blocking)
             threading.Thread(target=get_mongo_overview, daemon=True).start()
 
             cycle_num_total += 1
             completed = run_remote_colab_cycle(cycle_num_total, runs_today + 1)
 
-            if not completed and _DASHBOARD_AVAILABLE and _ds.should_stop():
+            if not completed and _should_stop():
                 break
 
             runs_today += 1
@@ -766,19 +804,19 @@ def _run_all_cycles():
             _emit("intermission",
                   msg=f"Anti-ban delay: {sleep_mins} min before next cycle",
                   delay=sleep_mins * 60)
-            _interruptible_sleep(sleep_mins * 60)
+            if not _interruptible_sleep(sleep_mins * 60):
+                break
         else:
             threading.Thread(target=get_mongo_overview, daemon=True).start()
             print(f"\nNo movies to process. Waiting {NO_MOVIE_WAIT_MINUTES} min...")
             _emit("intermission",
                   msg=f"No new movies. Checking again in {NO_MOVIE_WAIT_MINUTES} min",
                   delay=NO_MOVIE_WAIT_MINUTES * 60)
-            _interruptible_sleep(NO_MOVIE_WAIT_MINUTES * 60)
+            if not _interruptible_sleep(NO_MOVIE_WAIT_MINUTES * 60):
+                break
 
-    if _DASHBOARD_AVAILABLE:
-        _ds.mark_idle()
-    with _runner_lock:
-        _runner_thread = None
+    _emit("log", msg="Runner stopped.")
+    _finish_runner()
 
 
 def _start_fresh_run():
@@ -820,8 +858,8 @@ if __name__ == "__main__":
     setup_google_adc()
     check_dependencies()
 
-    if not os.environ.get("MONGO_URI"):
-        print("\nNOTE: MONGO_URI env var not set - using hardcoded URI in colab_demo.py\n")
+    if not _MONGO_URI:
+        sys.exit("FATAL: MONGO_URI environment variable is not set.")
 
     # Broadcast initial DB overview in background so it shows on dashboard immediately
     threading.Thread(target=get_mongo_overview, daemon=True).start()
